@@ -1,0 +1,25 @@
+const mongoose = require('mongoose');
+const NftSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true },
+  description: { type: String, default: '' },
+  image_url: { type: String, default: '' },
+  price_eth: { type: Number, default: 0.05 },
+  category: { type: String, default: '' },
+  category_id: { type: mongoose.Schema.Types.ObjectId, ref: 'NftCategory', default: null },
+  collection_name: { type: String, default: '' },
+  collection_id: { type: mongoose.Schema.Types.ObjectId, ref: 'NftCollection', default: null },
+  properties: { type: mongoose.Schema.Types.Mixed, default: {} },
+  creator_id: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  owner_id: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  creator_name: { type: String, default: '' },
+  owner_name: { type: String, default: '' },
+  status: { type: String, enum: ['available', 'sold', 'pending'], default: 'available' },
+  featured: { type: Boolean, default: false },
+  approved: { type: Boolean, default: true },
+  views: { type: Number, default: 0 },
+  likes: { type: Number, default: 0 },
+  liked_by: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  token_id: { type: String, default: '' },
+  royalty: { type: Number, default: 2.5 },
+}, { timestamps: true });
+module.exports = mongoose.model('Nft', NftSchema);
