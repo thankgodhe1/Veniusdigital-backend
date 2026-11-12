@@ -6,6 +6,7 @@ const SupportTicket = require('../models/SupportTicket');
 const Trade = require('../models/livetradingSchema');
 const Widthdraw = require('../models/widthdrawSchema');
 const Deposit = require('../models/depositSchema');
+const PaymentMethod = require('../models/PaymentMethod');
 const AccountHistory = require('../models/AccountHistory');
 const Verify = require('../models/verifySchema');
 // const CopyTrade = require('../models/CopyTrade');
@@ -1139,7 +1140,7 @@ router.get('/dashboard/deposit-data', async (req, res) => {
     const processedDeposits = deposits.filter((d) => statusValue(d) === 'processed').reduce((sum, d) => sum + Number(d.amount || 0), 0);
     const pendingDeposits = deposits.filter((d) => statusValue(d) === 'pending').reduce((sum, d) => sum + Number(d.amount || 0), 0);
     const express = history.filter((h) => statusValue(h) === 'processed' && String(h.narration || '').trim().toLowerCase() === 'express deposit').reduce((sum, h) => sum + Number(h.amount || 0), 0);
-    return res.json({ success: true, approved: processedDeposits + express, pending: pendingDeposits, methodCount: 13, deposits: deposits.map((d) => {
+    return res.json({ success: true, approved: processedDeposits + express, pending: pendingDeposits, methodCount: await PaymentMethod.countDocuments({ status: 'active' }), deposits: deposits.map((d) => {
       const match = history.find((h) => String(h.meta?.deposit_id || '') === String(d._id)) || history.find((h) => String(h.narration || '').trim().toLowerCase() === 'express deposit' && Number(h.amount || 0) === Number(d.amount || 0));
       return { ...publicDeposit(d), type: match?.type || d.payment_method || d.paymethd_method || d.type || 'Deposit', narration: d.narration || match?.narration || 'Payment' };
     }), history });
@@ -2541,6 +2542,38 @@ router.get('/dashboard/feature/assets', async (req,res)=>{
   return res.json({success:true,assets});
 
 });
+
+
+
+/* ---------------- USER: active payment methods + deposit draft ---------------- */
+router.get('/dashboard/feature/payment-methods', async (req, res) => {
+  try {
+    const methods = await PaymentMethod.find({ status: 'active' }).sort({ sort_order: 1, createdAt: 1 }).lean();
+    return res.json({ success: true, methods });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message || 'Failed to load payment methods' });
+  }
+});
+
+router.get('/dashboard/deposit-draft', async (req, res) => {
+  try {
+    const draft = req.session.depositDraft || null;
+    let method = null;
+    if (draft && draft.method) {
+      method = await PaymentMethod.findOne({
+        status: 'active',
+        $or: [
+          { name: new RegExp('^' + String(draft.method).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') },
+          { symbol: new RegExp('^' + String(draft.method).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
+        ]
+      }).lean();
+    }
+    return res.json({ success: true, draft, method });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message || 'Failed to load deposit draft' });
+  }
+});
+
 
 router.get('/dashboard/feature/wallet-settings', async(req,res)=>{ const s=await featureEnsureWalletSettings();
  return res.json({success:true,settings:s});

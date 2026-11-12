@@ -40,6 +40,7 @@ const NftTransaction = require('../models/NftTransaction');
 
 const FeatureWalletConnection = require('../models/WalletConnection');
 const FeatureWalletSettings = require('../models/WalletSettings');
+const FeaturePaymentMethod = require('../models/PaymentMethod');
 const FeaturePlans = require('../models/Plans');
 const FeatureUserPlans = require('../models/User_plans');
 const FeatureCard = require('../models/Card');
@@ -100,6 +101,17 @@ const walletStorage = new CloudinaryStorage({
   }
 });
 const uploadWallet = multer({ storage: walletStorage });
+
+const paymentMethodStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'pocket/payment-methods',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'gif'],
+    public_id: (req, file) => `pm_${file.fieldname}_${Date.now()}`
+  }
+});
+const uploadPaymentMethod = multer({ storage: paymentMethodStorage, limits: { fileSize: 5 * 1024 * 1024 } });
+
 
 const frontendUrl = () => String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
 
@@ -4136,6 +4148,136 @@ await fresh.user.save();
 
   return featureLocalRedirect(res,'/admin/active-investments.html','Investment settled successfully.');
 
+});
+
+
+
+
+/* ---------------- ADMIN: payment methods (deposit addresses) ---------------- */
+function parseNetworksBody(b) {
+  if (Array.isArray(b.networks)) return b.networks.map(String).map(s => s.trim()).filter(Boolean);
+  if (typeof b.networks === 'string' && b.networks.trim()) {
+    return b.networks.split(/[,|\n]/).map(s => s.trim()).filter(Boolean);
+  }
+  if (b.network) return [String(b.network).trim()].filter(Boolean);
+  return [];
+}
+
+router.get('/dashboard/feature/payment-methods', async (req, res) => {
+  try {
+    const methods = await FeaturePaymentMethod.find().sort({ sort_order: 1, createdAt: 1 }).lean();
+    return res.json({ success: true, methods });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message || 'Failed to load payment methods' });
+  }
+});
+
+router.get('/dashboard/feature/payment-methods/:id', async (req, res) => {
+  try {
+    const m = await FeaturePaymentMethod.findById(req.params.id).lean();
+    if (!m) return res.status(404).json({ success: false, message: 'Payment method not found' });
+    return res.json({ success: true, method: m });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message || 'Failed to load payment method' });
+  }
+});
+
+router.post('/dashboard/feature/payment-methods', uploadPaymentMethod.fields([
+  { name: 'logo', maxCount: 1 },
+  { name: 'qr_image', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const name = String(b.name || '').trim();
+    if (!name) return res.status(422).json({ success: false, message: 'Name is required' });
+    const networks = parseNetworksBody(b);
+    const logo = cloudUrl((req.files && req.files.logo && req.files.logo[0]) || null) || String(b.logo_url || '').trim();
+    const qr = cloudUrl((req.files && req.files.qr_image && req.files.qr_image[0]) || null) || String(b.qr_image_url || '').trim();
+    const count = await FeaturePaymentMethod.countDocuments();
+    const doc = await FeaturePaymentMethod.create({
+      name,
+      symbol: String(b.symbol || '').trim(),
+      logo_url: logo,
+      badge: String(b.badge || '').trim(),
+      address: String(b.address || '').trim(),
+      networks,
+      network: networks[0] || String(b.network || '').trim(),
+      min_amount: featureNum(b.min_amount, 10),
+      qr_image_url: qr,
+      status: String(b.status || 'active').toLowerCase() === 'inactive' ? 'inactive' : 'active',
+      sort_order: featureNum(b.sort_order, count),
+      icon_class: String(b.icon_class || '').trim(),
+      color: String(b.color || '#ffffff').trim(),
+      bg: String(b.bg || '').trim(),
+    });
+    return res.json({ success: true, message: 'Payment method created', method: doc });
+  } catch (e) {
+    console.error('create payment method', e);
+    return res.status(500).json({ success: false, message: e.message || 'Could not create payment method' });
+  }
+});
+
+router.put('/dashboard/feature/payment-methods/:id', uploadPaymentMethod.fields([
+  { name: 'logo', maxCount: 1 },
+  { name: 'qr_image', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const doc = await FeaturePaymentMethod.findById(req.params.id);
+    if (!doc) return res.status(404).json({ success: false, message: 'Payment method not found' });
+    const b = req.body || {};
+    if (b.name != null) doc.name = String(b.name).trim() || doc.name;
+    if (b.symbol != null) doc.symbol = String(b.symbol).trim();
+    if (b.badge != null) doc.badge = String(b.badge).trim();
+    if (b.address != null) doc.address = String(b.address).trim();
+    if (b.networks != null || b.network != null) {
+      const networks = parseNetworksBody(b);
+      doc.networks = networks;
+      doc.network = networks[0] || String(b.network || doc.network || '').trim();
+    }
+    if (b.min_amount != null) doc.min_amount = featureNum(b.min_amount, doc.min_amount);
+    if (b.sort_order != null) doc.sort_order = featureNum(b.sort_order, doc.sort_order);
+    if (b.icon_class != null) doc.icon_class = String(b.icon_class).trim();
+    if (b.color != null) doc.color = String(b.color).trim();
+    if (b.bg != null) doc.bg = String(b.bg).trim();
+    if (b.status != null) doc.status = String(b.status).toLowerCase() === 'inactive' ? 'inactive' : 'active';
+    if (b.logo_url != null && String(b.logo_url).trim()) doc.logo_url = String(b.logo_url).trim();
+    if (b.qr_image_url != null && String(b.qr_image_url).trim()) doc.qr_image_url = String(b.qr_image_url).trim();
+    const logoFile = req.files && req.files.logo && req.files.logo[0];
+    const qrFile = req.files && req.files.qr_image && req.files.qr_image[0];
+    if (logoFile) doc.logo_url = cloudUrl(logoFile) || doc.logo_url;
+    if (qrFile) doc.qr_image_url = cloudUrl(qrFile) || doc.qr_image_url;
+    await doc.save();
+    return res.json({ success: true, message: 'Payment method updated', method: doc });
+  } catch (e) {
+    console.error('update payment method', e);
+    return res.status(500).json({ success: false, message: e.message || 'Could not update payment method' });
+  }
+});
+
+router.post('/dashboard/feature/payment-methods/:id/toggle', async (req, res) => {
+  try {
+    const doc = await FeaturePaymentMethod.findById(req.params.id);
+    if (!doc) return res.status(404).json({ success: false, message: 'Payment method not found' });
+    if (req.body && (req.body.status === 'active' || req.body.status === 'inactive')) {
+      doc.status = req.body.status;
+    } else {
+      doc.status = doc.status === 'active' ? 'inactive' : 'active';
+    }
+    await doc.save();
+    return res.json({ success: true, message: `Method ${doc.status === 'active' ? 'enabled' : 'disabled'}`, method: doc });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message || 'Could not toggle method' });
+  }
+});
+
+router.delete('/dashboard/feature/payment-methods/:id', async (req, res) => {
+  try {
+    const doc = await FeaturePaymentMethod.findByIdAndDelete(req.params.id);
+    if (!doc) return res.status(404).json({ success: false, message: 'Payment method not found' });
+    return res.json({ success: true, message: 'Payment method deleted' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message || 'Could not delete method' });
+  }
 });
 
 
