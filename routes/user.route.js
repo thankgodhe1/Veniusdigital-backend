@@ -243,7 +243,44 @@ router.get('/dashboard', async (req, res) => {
     const verifyDoc = await Verify.findOne({ $or: [{ user: req.user._id }, { user_id: req.user._id }] }).sort({ createdAt: -1 }).lean().catch(() => null);
     const data = safeDashboardUser(req.user, verifyDoc);
     const unreadCount = await Notification.countDocuments({ user_id: req.user._id, read_at: null });
-    return res.json({ success: true, user: data, unreadCount });
+
+    // Overview metrics for dashboard Overview tab
+    const uid = req.user._id;
+    let deposited = 0;
+    let withdrawn = 0;
+    let totalTrades = 0;
+    let totalPnl = 0;
+    try {
+      const DepositModel = require('../models/depositSchema');
+      const depFilter = { $or: [{ user: uid }, { user_id: uid }], status: 'processed' };
+      const deps = await DepositModel.find(depFilter).select('amount is_loan_repayment loan_id narration').lean();
+      deposited = deps
+        .filter((d) => !(d.is_loan_repayment || d.loan_id || String(d.narration || '').toLowerCase().includes('loan repay')))
+        .reduce((s, d) => s + Number(d.amount || 0), 0);
+    } catch (e) { console.error('dashboard deposited sum', e.message); }
+    try {
+      const WithdrawModel = require('../models/widthdrawSchema');
+      const wds = await WithdrawModel.find({ $or: [{ user: uid }, { user_id: uid }], status: 'processed' }).select('amount amount_requested').lean();
+      withdrawn = wds.reduce((s, w) => s + Number(w.amount || w.amount_requested || 0), 0);
+    } catch (e) { console.error('dashboard withdrawn sum', e.message); }
+    try {
+      const TradeModel = require('../models/livetradingSchema');
+      const trades = await TradeModel.find({ user_id: uid }).select('profit_loss status').lean();
+      totalTrades = trades.length;
+      totalPnl = trades.reduce((s, t) => s + Number(t.profit_loss || 0), 0);
+    } catch (e) { console.error('dashboard trades sum', e.message); }
+
+    return res.json({
+      success: true,
+      user: data,
+      unreadCount,
+      overview: {
+        total_pnl: totalPnl,
+        deposited,
+        withdrawn,
+        total_trades: totalTrades,
+      },
+    });
   } catch (error) {
     console.error('Dashboard summary error:', error);
     return res.status(500).json({ success: false, message: 'Could not load dashboard' });
