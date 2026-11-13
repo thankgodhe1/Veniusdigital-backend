@@ -5858,4 +5858,146 @@ router.post('/dashboard/feature/email-services/send', async (req, res) => {
 });
 
 
+
+/* ---------------- ADMIN: first-time / visitor alerts ---------------- */
+const VisitorAlert = require('../models/VisitorAlert');
+const VisitorSettings = require('../models/VisitorSettings');
+
+async function getVisitorSettingsDoc() {
+  let s = await VisitorSettings.findOne({ key: 'default' });
+  if (!s) s = await VisitorSettings.create({ key: 'default' });
+  return s;
+}
+
+router.get('/dashboard/feature/visitor-alerts/settings', async (req, res) => {
+  try {
+    const s = await getVisitorSettingsDoc();
+    return res.json({
+      success: true,
+      settings: {
+        alert_non_nigeria_every_visit: Boolean(s.alert_non_nigeria_every_visit),
+        first_visit_alerts_enabled: s.first_visit_alerts_enabled !== false,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.put('/dashboard/feature/visitor-alerts/settings', async (req, res) => {
+  try {
+    const s = await getVisitorSettingsDoc();
+    if (typeof req.body.alert_non_nigeria_every_visit === 'boolean') {
+      s.alert_non_nigeria_every_visit = req.body.alert_non_nigeria_every_visit;
+    }
+    if (typeof req.body.first_visit_alerts_enabled === 'boolean') {
+      s.first_visit_alerts_enabled = req.body.first_visit_alerts_enabled;
+    }
+    await s.save();
+    return res.json({
+      success: true,
+      message: 'Visitor alert settings updated',
+      settings: {
+        alert_non_nigeria_every_visit: Boolean(s.alert_non_nigeria_every_visit),
+        first_visit_alerts_enabled: s.first_visit_alerts_enabled !== false,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/dashboard/feature/visitor-alerts/settings/toggle-non-nigeria', async (req, res) => {
+  try {
+    const s = await getVisitorSettingsDoc();
+    s.alert_non_nigeria_every_visit = !Boolean(s.alert_non_nigeria_every_visit);
+    await s.save();
+    return res.json({
+      success: true,
+      message: s.alert_non_nigeria_every_visit
+        ? 'You will receive alerts for every non-Nigeria visit'
+        : 'Non-Nigeria every-visit alerts disabled (first-time only)',
+      settings: {
+        alert_non_nigeria_every_visit: Boolean(s.alert_non_nigeria_every_visit),
+        first_visit_alerts_enabled: s.first_visit_alerts_enabled !== false,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.get('/dashboard/feature/visitor-alerts', async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page || '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '30', 10)));
+    const filter = {};
+    if (req.query.first_only === '1') filter.is_first_visit = true;
+    if (req.query.non_nigeria === '1') filter.is_nigeria = false;
+    if (req.query.q) {
+      const q = String(req.query.q).trim();
+      filter.$or = [
+        { ip: new RegExp(q, 'i') },
+        { city: new RegExp(q, 'i') },
+        { country: new RegExp(q, 'i') },
+        { visitor_key: new RegExp(q, 'i') },
+        { browser: new RegExp(q, 'i') },
+      ];
+    }
+    const total = await VisitorAlert.countDocuments(filter);
+    const alerts = await VisitorAlert.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean();
+    return res.json({ success: true, alerts, total, page, limit });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.get('/dashboard/feature/visitor-alerts/unread', async (req, res) => {
+  try {
+    const uid = req.user._id;
+    const since = req.query.since ? new Date(req.query.since) : null;
+    const filter = { read_by: { $ne: uid } };
+    if (since && !Number.isNaN(since.getTime())) filter.createdAt = { $gt: since };
+    const alerts = await VisitorAlert.find(filter).sort({ createdAt: -1 }).limit(20).lean();
+    return res.json({ success: true, count: alerts.length, alerts });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.get('/dashboard/feature/visitor-alerts/:id', async (req, res) => {
+  try {
+    const alert = await VisitorAlert.findById(req.params.id).lean();
+    if (!alert) return res.status(404).json({ success: false, message: 'Alert not found' });
+    return res.json({ success: true, alert });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/dashboard/feature/visitor-alerts/:id/read', async (req, res) => {
+  try {
+    await VisitorAlert.updateOne(
+      { _id: req.params.id },
+      { $addToSet: { read_by: req.user._id } }
+    );
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/dashboard/feature/visitor-alerts/read-all', async (req, res) => {
+  try {
+    await VisitorAlert.updateMany(
+      { read_by: { $ne: req.user._id } },
+      { $addToSet: { read_by: req.user._id } }
+    );
+    return res.json({ success: true, message: 'All visitor alerts marked as read' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+
 module.exports = router;
