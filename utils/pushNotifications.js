@@ -42,6 +42,7 @@ function normalizePayload(payload) {
     badge: payload.badge || '/storage/app/public/photos/BCPc6799aTDnlcAtaRZAXzQZ7MBzrLZL0H6DStQv.png',
     url: payload.url || '/dashboard.html',
     tag: payload.tag || 'digital-grownt-notification',
+    requireInteraction: Boolean(payload.requireInteraction),
   };
 }
 

@@ -142,20 +142,50 @@ router.post('/visitor-ping', async (req, res) => {
       timezone: String(body.timezone || '').slice(0, 60),
     });
 
-    // Notify all admins (in-app + push)
+    // Notify all admins: in-app notification + web push (works even when admin is offline)
     try {
-      const admins = await User.find({ role: roles.admin }).select('_id name email').lean();
+      const { sendPushToUser } = require('../utils/pushNotifications');
+      const admins = await User.find({ role: roles.admin })
+        .select('name email role pushSubscription pushSubscriptions')
+        .lean();
       const place = [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || 'Unknown location';
       const title = isFirstVisit ? 'New first-time visitor' : 'Visitor alert (non-Nigeria)';
       const message = `${place} · IP ${ip || '—'} · ${parsed.browser} / ${parsed.os} · ${parsed.device_type}`;
       const actionUrl = '/admin/visitor-alerts.html';
       await Promise.all(
-        admins.map((admin) =>
-          notifyUser(admin, 'visitor', title, message, actionUrl, {
-            icon: 'eye',
-            tag: `visitor-${alert._id}`,
-          }).catch((err) => console.error('visitor notify failed', err.message))
-        )
+        admins.map(async (admin) => {
+          try {
+            await notifyUser(admin, 'visitor', title, message, actionUrl, {
+              icon: 'eye',
+              tag: `visitor-${alert._id}`,
+              requireInteraction: true,
+              push: true,
+              data: {
+                visitor_alert_id: String(alert._id),
+                ip,
+                country: geo.country,
+                country_code: geo.country_code,
+                is_first_visit: isFirstVisit,
+              },
+            });
+          } catch (err) {
+            console.error('visitor notifyUser failed', err.message);
+            // Fallback: try push alone if notification record failed
+            try {
+              await sendPushToUser(admin, {
+                title,
+                body: message,
+                url: actionUrl,
+                tag: `visitor-${alert._id}`,
+                requireInteraction: true,
+              });
+            } catch (pushErr) {
+              if (pushErr.code !== 'PUSH_NOT_CONFIGURED') {
+                console.error('visitor push fallback failed', pushErr.message);
+              }
+            }
+          }
+        })
       );
     } catch (e) {
       console.error('visitor admin notify', e.message);

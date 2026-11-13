@@ -60,31 +60,54 @@ async function notifyUser(user, type, title, message, actionUrl = null, options 
   const userId = user?._id || user?.id || user;
   if (!userId) throw new Error('A user is required to create a notification');
 
+  const resolvedType = type || 'account';
+  const resolvedIcon =
+    options.icon ||
+    (resolvedType === 'kyc' ? 'shield' :
+     resolvedType === 'account' ? 'user' :
+     resolvedType === 'visitor' ? 'eye' : 'bell');
+  const resolvedUrl = normalizeUrl(actionUrl);
+
   const notification = await Notification.create({
     user_id: userId,
-    type: type || 'account',
+    type: resolvedType,
     title: String(title || 'Notification'),
     message: String(message || ''),
-    icon: options.icon || (type === 'kyc' ? 'shield' : type === 'account' ? 'user' : 'bell'),
-    action_url: normalizeUrl(actionUrl),
+    icon: resolvedIcon,
+    action_url: resolvedUrl,
     data: {
       title: String(title || 'Notification'),
       message: String(message || ''),
-      type: type || 'account',
-      icon: options.icon || (type === 'kyc' ? 'shield' : type === 'account' ? 'user' : 'bell'),
-      action_url: normalizeUrl(actionUrl),
+      type: resolvedType,
+      icon: resolvedIcon,
+      action_url: resolvedUrl,
+      ...(options.data && typeof options.data === 'object' ? options.data : {}),
     },
   });
 
   if (options.push !== false) {
     try {
-      await sendPushToUser(user, {
+      // Ensure we have push subscription documents (lean selects often omit them)
+      let pushUser = user;
+      const hasSubs =
+        (pushUser && Array.isArray(pushUser.pushSubscriptions) && pushUser.pushSubscriptions.length) ||
+        (pushUser && pushUser.pushSubscription && pushUser.pushSubscription.endpoint);
+      if (!hasSubs) {
+        const User = require('../models/user.model');
+        pushUser = await User.findById(userId)
+          .select('+pushSubscription pushSubscription pushSubscriptions')
+          .select('pushSubscription pushSubscriptions name email role')
+          .lean();
+        if (!pushUser) pushUser = { _id: userId };
+      }
+      await sendPushToUser(pushUser, {
         title: notification.title,
         body: notification.message,
-        url: notification.action_url || '/user/dashboard.html',
+        url: notification.action_url || (resolvedType === 'visitor' ? '/admin/visitor-alerts.html' : '/user/dashboard.html'),
         tag: options.tag || `digital-grownt-${notification.type}-${notification._id}`,
         icon: options.pushIcon,
         badge: options.pushBadge,
+        requireInteraction: options.requireInteraction === true || resolvedType === 'visitor',
       });
     } catch (error) {
       if (error.code !== 'PUSH_NOT_CONFIGURED') console.error('Push notification failed:', error.message);
