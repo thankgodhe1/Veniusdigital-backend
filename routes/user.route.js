@@ -2935,9 +2935,22 @@ router.post('/dashboard/feature/trades', async(req,res)=>{
       bal=featureNum(u.demo_balance!=null?u.demo_balance:(u.demo_bal!=null?u.demo_bal:0));
     }
     if(amount>bal) return res.status(422).json({success:false,message:'Insufficient balance.'});
-    const assetId=b.trading_asset_id||b.asset_id;
-    const asset=assetId?await FeatureTradingAsset.findById(assetId):null;
-    if(!asset) return res.status(404).json({success:false,message:'Asset not found.'});
+    const assetId = b.trading_asset_id || b.asset_id;
+    const symbolHint = String(b.symbol || b.asset_symbol || '').trim().toUpperCase();
+    let asset = null;
+    const oidOk = assetId && /^[a-fA-F0-9]{24}$/.test(String(assetId));
+    if (oidOk) {
+      asset = await FeatureTradingAsset.findById(assetId);
+    }
+    if (!asset && symbolHint) {
+      asset = await FeatureTradingAsset.findOne({ symbol: symbolHint, is_active: true });
+    }
+    if (!asset && assetId && !oidOk) {
+      // Non-ObjectId ids (legacy static numbers) are not valid — ask client to reload assets
+      return res.status(422).json({ success: false, message: 'Invalid asset id. Reload the page and select an asset from the server list.' });
+    }
+    if (!asset) return res.status(404).json({ success: false, message: 'Asset not found.' });
+    if (asset.is_active === false) return res.status(422).json({ success: false, message: 'This asset is not available for trading.' });
     const entry=featureNum(asset.price||asset.current_price||b.entry_price);
     const leverage=featureNum(b.leverage,5)||5;
     const duration=featureNum(b.duration||b.duration_minutes,5);
