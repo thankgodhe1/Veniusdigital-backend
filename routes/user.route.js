@@ -1154,8 +1154,21 @@ router.post('/dashboard/newdeposit', async (req, res) => {
     const amount = Number(req.body.amount);
     const method = String(req.body.payment_method || req.body.paymethd_method || req.body.method || '').trim();
     if (!Number.isFinite(amount) || amount < 10 || !method) return res.status(422).json({ success: false, message: 'Select a payment method and enter a valid deposit amount of at least 10.' });
-    req.session.depositDraft = { amount, method, createdAt: Date.now() };
-    return res.json({ success: true, amount, method, redirect: `${frontendUrl()}/user/payment.html` });
+    // Resolve method id when possible so payment page can load address/QR reliably
+    let methodId = null;
+    try {
+      const escaped = method.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const doc = await PaymentMethod.findOne({
+        status: 'active',
+        $or: [
+          { name: new RegExp('^' + escaped + '$', 'i') },
+          { symbol: new RegExp('^' + escaped + '$', 'i') }
+        ]
+      }).select('_id name address qr_image_url').lean();
+      if (doc) methodId = String(doc._id);
+    } catch (_) {}
+    req.session.depositDraft = { amount, method, methodId, createdAt: Date.now() };
+    return res.json({ success: true, amount, method, methodId, redirect: `${frontendUrl()}/user/payment.html` });
   } catch (error) {
     console.error('newdeposit error:', error);
     return res.status(500).json({ success: false, message: error.message || 'Could not start deposit' });
@@ -1192,11 +1205,41 @@ router.get('/dashboard/payment-data', async (req, res) => {
   try {
     const draft = req.session.depositDraft || null;
     if (!draft) return res.status(404).json({ success: false, message: 'No deposit payment session was found.' });
-    const addresses = { Bitcoin: '1FsdggFaSzkDFkCZFtGWUFpL9EYHt9pg1T', Ethereum: '0xfa20E292a608e1828939BdFee258976c270e5c73', Litecoin: 'LMx8zXebD3khyFHKkmt9NhaJ1e7HA5B22Z', USDT: '0xfa20E292a608e1828939BdFee258976c270e5c73', Solana: '6nEHk142s3gXf1sYK3auzFKwKWbD24548D541qXfk2dq', XRP: 'rsNAwgyFkDrMWW21DpinDAHhVhSdj16Ynp', Hype: '', 'Bitcoin Cash': '', Chainlink: '', XLM: '', Avalanche: '', ADA: '', Atom: '' };
+
+    // Resolve address / QR / logo from admin-managed PaymentMethod records
+    let methodDoc = null;
+    if (draft.methodId) {
+      try { methodDoc = await PaymentMethod.findById(draft.methodId).lean(); } catch (_) {}
+      if (methodDoc && methodDoc.status && methodDoc.status !== 'active') methodDoc = null;
+    }
+    const methodKey = String(draft.method || '').trim();
+    if (!methodDoc && methodKey) {
+      const escaped = methodKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      methodDoc = await PaymentMethod.findOne({
+        status: 'active',
+        $or: [
+          { name: new RegExp('^' + escaped + '$', 'i') },
+          { symbol: new RegExp('^' + escaped + '$', 'i') }
+        ]
+      }).lean();
+    }
+
+    const address = (methodDoc && methodDoc.address) ? String(methodDoc.address).trim() : '';
+    const qr_image_url = (methodDoc && methodDoc.qr_image_url) ? String(methodDoc.qr_image_url).trim() : '';
+    const logo_url = (methodDoc && methodDoc.logo_url) ? String(methodDoc.logo_url).trim() : '';
+    const network = (methodDoc && (methodDoc.network || (Array.isArray(methodDoc.networks) && methodDoc.networks[0]))) || '';
+    const methodName = (methodDoc && methodDoc.name) || methodKey || 'Payment';
+
     return res.json({
       success: true,
       ...draft,
-      address: addresses[draft.method] || addresses[String(draft.method||'').trim()] || '',
+      method: methodName,
+      address,
+      qr_image_url,
+      logo_url,
+      network,
+      networks: (methodDoc && methodDoc.networks) || (network ? [network] : []),
+      symbol: (methodDoc && methodDoc.symbol) || '',
       currency_code: (req.user && req.user.currency_code) || 'USD',
       is_loan_repayment: !!(draft.loan_id),
       loan_id: draft.loan_id || null,
@@ -2596,14 +2639,22 @@ router.get('/dashboard/deposit-draft', async (req, res) => {
   try {
     const draft = req.session.depositDraft || null;
     let method = null;
-    if (draft && draft.method) {
-      method = await PaymentMethod.findOne({
-        status: 'active',
-        $or: [
-          { name: new RegExp('^' + String(draft.method).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') },
-          { symbol: new RegExp('^' + String(draft.method).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
-        ]
-      }).lean();
+    if (draft) {
+      if (draft.methodId) {
+        try { method = await PaymentMethod.findById(draft.methodId).lean(); } catch (_) {}
+      }
+      if (!method && draft.method) {
+        const escaped = String(draft.method).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        method = await PaymentMethod.findOne({
+          status: 'active',
+          $or: [
+            { name: new RegExp('^' + escaped + '$', 'i') },
+            { symbol: new RegExp('^' + escaped + '$', 'i') }
+          ]
+        }).lean();
+      }
+      // Only return active methods to the user-facing deposit flow
+      if (method && method.status && method.status !== 'active') method = null;
     }
     return res.json({ success: true, draft, method });
   } catch (e) {
