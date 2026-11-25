@@ -1,5 +1,6 @@
 const express = require('express');
 const router = require('express').Router();
+const mongoose = require('mongoose');
 
 const User = require('../models/user.model');
 const SupportTicket = require('../models/SupportTicket');
@@ -1149,26 +1150,91 @@ router.get('/dashboard/get-method/:id', (req, res) => {
   });
 });
 
+async function resolveActivePaymentMethod({ methodId, methodName } = {}) {
+  let methodDoc = null;
+  const id = methodId != null ? String(methodId).trim() : '';
+  if (id && mongoose.Types.ObjectId.isValid(id)) {
+    try {
+      methodDoc = await PaymentMethod.findById(id).lean();
+      if (methodDoc && methodDoc.status && methodDoc.status !== 'active') methodDoc = null;
+    } catch (_) { methodDoc = null; }
+  }
+  const name = String(methodName || '').trim();
+  if (!methodDoc && name) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    methodDoc = await PaymentMethod.findOne({
+      status: 'active',
+      $or: [
+        { name: new RegExp('^' + escaped + '$', 'i') },
+        { symbol: new RegExp('^' + escaped + '$', 'i') }
+      ]
+    }).lean();
+  }
+  return methodDoc;
+}
+
+function paymentMethodPayload(methodDoc, fallbackName = '') {
+  if (!methodDoc) {
+    return {
+      method: fallbackName || 'Payment',
+      methodId: null,
+      address: '',
+      qr_image_url: '',
+      logo_url: '',
+      network: '',
+      networks: [],
+      symbol: '',
+      min_amount: 10
+    };
+  }
+  const networks = Array.isArray(methodDoc.networks) ? methodDoc.networks.filter(Boolean) : [];
+  const network = methodDoc.network || networks[0] || '';
+  return {
+    method: methodDoc.name || fallbackName || 'Payment',
+    methodId: String(methodDoc._id),
+    address: String(methodDoc.address || '').trim(),
+    qr_image_url: String(methodDoc.qr_image_url || '').trim(),
+    logo_url: String(methodDoc.logo_url || '').trim(),
+    network,
+    networks: networks.length ? networks : (network ? [network] : []),
+    symbol: String(methodDoc.symbol || '').trim(),
+    min_amount: Number(methodDoc.min_amount) || 10
+  };
+}
+
 router.post('/dashboard/newdeposit', async (req, res) => {
   try {
     const amount = Number(req.body.amount);
-    const method = String(req.body.payment_method || req.body.paymethd_method || req.body.method || '').trim();
-    if (!Number.isFinite(amount) || amount < 10 || !method) return res.status(422).json({ success: false, message: 'Select a payment method and enter a valid deposit amount of at least 10.' });
-    // Resolve method id when possible so payment page can load address/QR reliably
-    let methodId = null;
-    try {
-      const escaped = method.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const doc = await PaymentMethod.findOne({
-        status: 'active',
-        $or: [
-          { name: new RegExp('^' + escaped + '$', 'i') },
-          { symbol: new RegExp('^' + escaped + '$', 'i') }
-        ]
-      }).select('_id name address qr_image_url').lean();
-      if (doc) methodId = String(doc._id);
-    } catch (_) {}
-    req.session.depositDraft = { amount, method, methodId, createdAt: Date.now() };
-    return res.json({ success: true, amount, method, methodId, redirect: `${frontendUrl()}/user/payment.html` });
+    const methodName = String(req.body.payment_method || req.body.paymethd_method || req.body.method || '').trim();
+    const methodId = String(req.body.methodId || req.body.method_id || req.body.payment_method_id || '').trim();
+    if (!Number.isFinite(amount) || amount < 10) {
+      return res.status(422).json({ success: false, message: 'Enter a valid deposit amount of at least 10.' });
+    }
+    if (!methodName && !methodId) {
+      return res.status(422).json({ success: false, message: 'Select a payment method and enter a valid deposit amount of at least 10.' });
+    }
+    const methodDoc = await resolveActivePaymentMethod({ methodId, methodName });
+    if (!methodDoc) {
+      return res.status(404).json({ success: false, message: 'Selected payment method is not available. Please choose another method.' });
+    }
+    const payload = paymentMethodPayload(methodDoc, methodName);
+    req.session.depositDraft = {
+      amount,
+      method: payload.method,
+      methodId: payload.methodId,
+      createdAt: Date.now()
+    };
+    const qs = new URLSearchParams({
+      methodId: payload.methodId,
+      amount: String(amount)
+    }).toString();
+    return res.json({
+      success: true,
+      amount,
+      method: payload.method,
+      methodId: payload.methodId,
+      redirect: `${frontendUrl()}/user/payment.html?${qs}`
+    });
   } catch (error) {
     console.error('newdeposit error:', error);
     return res.status(500).json({ success: false, message: error.message || 'Could not start deposit' });
@@ -1204,48 +1270,55 @@ router.get('/dashboard/deposit-data', async (req, res) => {
 router.get('/dashboard/payment-data', async (req, res) => {
   try {
     const draft = req.session.depositDraft || null;
-    if (!draft) return res.status(404).json({ success: false, message: 'No deposit payment session was found.' });
+    const qMethodId = String(req.query.methodId || req.query.method_id || '').trim();
+    const qAmount = Number(req.query.amount);
+    const qMethodName = String(req.query.method || req.query.payment_method || '').trim();
 
-    // Resolve address / QR / logo from admin-managed PaymentMethod records
-    let methodDoc = null;
-    if (draft.methodId) {
-      try { methodDoc = await PaymentMethod.findById(draft.methodId).lean(); } catch (_) {}
-      if (methodDoc && methodDoc.status && methodDoc.status !== 'active') methodDoc = null;
-    }
-    const methodKey = String(draft.method || '').trim();
-    if (!methodDoc && methodKey) {
-      const escaped = methodKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      methodDoc = await PaymentMethod.findOne({
-        status: 'active',
-        $or: [
-          { name: new RegExp('^' + escaped + '$', 'i') },
-          { symbol: new RegExp('^' + escaped + '$', 'i') }
-        ]
-      }).lean();
+    // Prefer explicit query params so payment works even if session cookie is missing
+    const methodId = qMethodId || (draft && draft.methodId) || '';
+    const methodName = qMethodName || (draft && draft.method) || '';
+    const amount = (Number.isFinite(qAmount) && qAmount > 0)
+      ? qAmount
+      : (draft && Number(draft.amount)) || 0;
+
+    if (!methodId && !methodName && !draft) {
+      return res.status(404).json({ success: false, message: 'No deposit payment session was found. Please start again from the deposit page.' });
     }
 
-    const address = (methodDoc && methodDoc.address) ? String(methodDoc.address).trim() : '';
-    const qr_image_url = (methodDoc && methodDoc.qr_image_url) ? String(methodDoc.qr_image_url).trim() : '';
-    const logo_url = (methodDoc && methodDoc.logo_url) ? String(methodDoc.logo_url).trim() : '';
-    const network = (methodDoc && (methodDoc.network || (Array.isArray(methodDoc.networks) && methodDoc.networks[0]))) || '';
-    const methodName = (methodDoc && methodDoc.name) || methodKey || 'Payment';
+    const methodDoc = await resolveActivePaymentMethod({ methodId, methodName });
+    const payload = paymentMethodPayload(methodDoc, methodName || (draft && draft.method) || '');
+
+    // Refresh session draft when we could resolve a method (best-effort; not required)
+    if (methodDoc && amount > 0) {
+      try {
+        req.session.depositDraft = {
+          ...(draft || {}),
+          amount,
+          method: payload.method,
+          methodId: payload.methodId,
+          createdAt: (draft && draft.createdAt) || Date.now()
+        };
+      } catch (_) {}
+    }
 
     return res.json({
       success: true,
-      ...draft,
-      method: methodName,
-      address,
-      qr_image_url,
-      logo_url,
-      network,
-      networks: (methodDoc && methodDoc.networks) || (network ? [network] : []),
-      symbol: (methodDoc && methodDoc.symbol) || '',
+      amount: amount || (draft && draft.amount) || 0,
+      method: payload.method,
+      methodId: payload.methodId,
+      address: payload.address,
+      qr_image_url: payload.qr_image_url,
+      logo_url: payload.logo_url,
+      network: payload.network,
+      networks: payload.networks,
+      symbol: payload.symbol,
+      min_amount: payload.min_amount,
       currency_code: (req.user && req.user.currency_code) || 'USD',
-      is_loan_repayment: !!(draft.loan_id),
-      loan_id: draft.loan_id || null,
-      installment: draft.installment || null,
-      narration: draft.narration || 'Deposit',
-      return_url: draft.return_url || '/user/deposits.html'
+      is_loan_repayment: !!(draft && draft.loan_id),
+      loan_id: (draft && draft.loan_id) || null,
+      installment: (draft && draft.installment) || null,
+      narration: (draft && draft.narration) || 'Deposit',
+      return_url: (draft && draft.return_url) || '/user/deposits.html'
     });
   } catch (error) {
     console.error('payment-data error:', error);
@@ -2638,27 +2711,40 @@ router.get('/dashboard/feature/payment-methods', async (req, res) => {
 router.get('/dashboard/deposit-draft', async (req, res) => {
   try {
     const draft = req.session.depositDraft || null;
-    let method = null;
-    if (draft) {
-      if (draft.methodId) {
-        try { method = await PaymentMethod.findById(draft.methodId).lean(); } catch (_) {}
-      }
-      if (!method && draft.method) {
-        const escaped = String(draft.method).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        method = await PaymentMethod.findOne({
-          status: 'active',
-          $or: [
-            { name: new RegExp('^' + escaped + '$', 'i') },
-            { symbol: new RegExp('^' + escaped + '$', 'i') }
-          ]
-        }).lean();
-      }
-      // Only return active methods to the user-facing deposit flow
-      if (method && method.status && method.status !== 'active') method = null;
-    }
-    return res.json({ success: true, draft, method });
+    const qMethodId = String(req.query.methodId || req.query.method_id || '').trim();
+    const qMethodName = String(req.query.method || req.query.payment_method || '').trim();
+    const qAmount = Number(req.query.amount);
+
+    const methodId = qMethodId || (draft && draft.methodId) || '';
+    const methodName = qMethodName || (draft && draft.method) || '';
+
+    const method = await resolveActivePaymentMethod({ methodId, methodName });
+    const amount = (Number.isFinite(qAmount) && qAmount > 0)
+      ? qAmount
+      : (draft && Number(draft.amount)) || null;
+
+    const effectiveDraft = draft || (method || amount
+      ? {
+          amount: amount || 0,
+          method: (method && method.name) || methodName || '',
+          methodId: method ? String(method._id) : (methodId || null),
+          createdAt: Date.now()
+        }
+      : null);
+
+    return res.json({ success: true, draft: effectiveDraft, method });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message || 'Failed to load deposit draft' });
+  }
+});
+
+router.get('/dashboard/feature/payment-methods/:id', async (req, res) => {
+  try {
+    const method = await resolveActivePaymentMethod({ methodId: req.params.id });
+    if (!method) return res.status(404).json({ success: false, message: 'Payment method not found' });
+    return res.json({ success: true, method });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message || 'Failed to load payment method' });
   }
 });
 
@@ -3438,9 +3524,15 @@ router.post('/dashboard/feature/loans/:id/repay-deposit', async(req,res)=>{
     if(amount <= 0) return res.status(422).json({success:false,message:'Invalid amount.'});
     if(!method) return res.status(422).json({success:false,message:'Select a payment method.'});
     // Same flow as normal deposit: store draft in session → user completes payment on payment.html
+    const methodDoc = await resolveActivePaymentMethod({
+      methodId: String(req.body.methodId || req.body.method_id || '').trim(),
+      methodName: method
+    });
+    const resolved = paymentMethodPayload(methodDoc, method);
     req.session.depositDraft = {
       amount,
-      method,
+      method: resolved.method || method,
+      methodId: resolved.methodId,
       createdAt: Date.now(),
       loan_id: String(loan._id),
       schedule_id,
@@ -3450,11 +3542,17 @@ router.post('/dashboard/feature/loans/:id/repay-deposit', async(req,res)=>{
         : `Loan repayment — Loan #${String(loan._id).slice(-4)}`,
       return_url: `/user/loans-details.html?id=${loan._id}`
     };
+    const qs = new URLSearchParams({
+      amount: String(amount),
+      ...(resolved.methodId ? { methodId: resolved.methodId } : {}),
+      ...(!resolved.methodId && method ? { method } : {})
+    }).toString();
     return res.json({
       success: true,
       amount,
-      method,
-      redirect: '/user/payment.html',
+      method: resolved.method || method,
+      methodId: resolved.methodId,
+      redirect: `/user/payment.html?${qs}`,
       message: 'Continue to payment page'
     });
   }catch(e){ console.error(e); return res.status(500).json({success:false,message:e.message}); }
